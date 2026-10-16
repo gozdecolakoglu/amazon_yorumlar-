@@ -1,0 +1,5 @@
+﻿model,train_accuracy,test_accuracy
+Naive Bayes,0.875,0.9
+Lojistik Regresyon,1.0,0.9
+Support Vector Machine,1.0,0.9
+Random Forest,1.0,0.9

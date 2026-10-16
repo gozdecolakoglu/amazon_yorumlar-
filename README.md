@@ -44,3 +44,49 @@ değerlendirirken sınıf dengesizliğini ve örnek sayısını göz önünde bu
 ```powershell
 py -m unittest -v .\test_veri_on_isleme.py
 ```
+
+## Sınıflandırma modelleri
+
+Naive Bayes, lojistik regresyon, Support Vector Machine, Random Forest ve
+Türkçe BERT modellerini aynı stratified eğitim/test bölmesinde eğitip doğruluk
+puanlarını hesaplamak için:
+
+```powershell
+py -m pip install -r .\requirements-ml.txt
+py .\siniflandirma.py
+```
+
+Türkçe BERT için `dbmdz/bert-base-turkish-cased` önceden eğitilmiş modeli
+indirilir. Klasik TF-IDF modelleri `review_clean` sütununu; BERT ise önceden
+eğitildiği yüzey biçimlerini korumak için ham `review` metnini kullanır.
+Bütün modeller aynı sabit tohumla oluşturulan stratified %80 eğitim / %20 test
+bölmesini ve puandan türetilen `sentiment` etiketini paylaşır. Her iki
+doğruluk puanı terminale yazılır ve `siniflandirma_sonuclari.csv` dosyasına
+kaydedilir.
+
+Varsayılan BERT eğitimi 3 epoch sürer. Ayarlanabilir:
+
+```powershell
+py .\siniflandirma.py --epochs 5 --batch-size 8
+```
+
+Yalnızca klasik modelleri çalıştırmak için `--skip-bert` kullanılabilir.
+Sonuçları değerlendirirken veri kümesinin küçük ve dengesiz olduğunu
+(olumlu sınıfı baskın) göz önünde bulundurun; tek bir test bölmesindeki
+doğruluk puanları genellenebilir performans garantisi değildir.
+
+Bu veri kümesinde (78 eğitim / 20 test örneği, `random_state=42`) ölçülen
+doğruluklar:
+
+| Model | Eğitim doğruluğu | Test doğruluğu |
+|---|---:|---:|
+| Naive Bayes | %87,18 | %90,00 |
+| Lojistik Regresyon | %100,00 | %90,00 |
+| Support Vector Machine | %100,00 | %90,00 |
+| Random Forest | %100,00 | %90,00 |
+| Türkçe BERT (`dbmdz/bert-base-turkish-cased`) | %89,74 | %90,00 |
+
+Test kümesindeki 20 yorumun 18'i olumlu olduğundan, her yorumu olumlu sayan
+çoğunluk tabanı da %90 test doğruluğu alır. Bu nedenle bu deneydeki test
+doğrulukları, modellerin çoğunluk tabanını aştığını göstermiyor; daha fazla ve
+dengeli etiketli veriyle tekrar değerlendirme yapılmalı.
