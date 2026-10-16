@@ -2,7 +2,7 @@ from __future__ import annotations  # Tip açıklamalarını Python sürümleri 
 
 import argparse  # Eğitim ayarlarını ve dosya yollarını komut satırından almak için.
 import csv  # Yorumları okumak ve doğruluk sonuçlarını CSV'ye kaydetmek için.
-import math  # Yıldız puanlarının geçerli aralıkta ve sonlu olduğunu denetlemek için.
+import math  # Duygu modelinin olasılıklarını ve nötr eşiğini doğrulamak için.
 import random  # BERT eğitim sırasını tekrarlanabilir kılmak için.
 import re  # Temel Türkçe metin normalizasyonunda URL ve boşlukları düzenlemek için.
 import unicodedata  # Türkçe karakterleri tek bir Unicode biçimine getirmek için.
@@ -23,29 +23,42 @@ from sklearn.svm import LinearSVC  # Doğrusal Support Vector Machine sınıflan
 
 RANDOM_SEED = 42
 LABELS = ("olumsuz", "notr", "olumlu")
+LABELER_MODEL = "savasy/bert-base-turkish-sentiment-cased"
+NEUTRAL_THRESHOLD = 0.60
 TURKISH_CASE_TRANSLATION = str.maketrans({"I": "ı", "İ": "i"})
 URL_PATTERN = re.compile(r"(?:https?://|www\.)\S+", re.IGNORECASE)
 WHITESPACE_PATTERN = re.compile(r"\s+")
 
 
-def sentiment_from_rating(rating: float) -> str:
-    if not math.isfinite(rating) or not 1 <= rating <= 5:
-        raise ValueError(f"Puan 1 ile 5 arasında olmalı: {rating}")
-    if rating <= 2:
-        return "olumsuz"
-    if rating == 3:
-        return "notr"
-    return "olumlu"
+def sentiment_from_probabilities(
+    positive_probability: float,
+    neutral_threshold: float = NEUTRAL_THRESHOLD,
+) -> tuple[str, float]:
+    if not math.isfinite(positive_probability) or not 0 <= positive_probability <= 1:
+        raise ValueError("Olumlu duygu olasılığı 0 ile 1 arasında olmalı.")
+    if not math.isfinite(neutral_threshold) or not 0.5 < neutral_threshold <= 1:
+        raise ValueError("Nötr eşiği 0,5'ten büyük ve 1'e eşit veya küçük olmalı.")
+
+    negative_probability = 1 - positive_probability
+    confidence = max(positive_probability, negative_probability)
+    if confidence < neutral_threshold:
+        return "notr", confidence
+    if positive_probability > negative_probability:
+        return "olumlu", confidence
+    return "olumsuz", confidence
 
 
-def load_reviews(input_path: Path) -> tuple[list[str], list[str], list[str]]:
+def load_reviews(
+    input_path: Path,
+) -> tuple[list[str], list[str], list[str], list[str]]:
     texts: list[str] = []
-    labels: list[str] = []
     model_texts: list[str] = []
+    review_ids: list[str] = []
+    raw_reviews: list[str] = []
 
     with input_path.open("r", encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
-        missing_columns = {"review", "rating"} - set(reader.fieldnames or [])
+        missing_columns = {"review"} - set(reader.fieldnames or [])
         if missing_columns:
             raise ValueError(
                 "CSV dosyasında gerekli sütunlar eksik: "
@@ -56,26 +69,115 @@ def load_reviews(input_path: Path) -> tuple[list[str], list[str], list[str]]:
             review = (row.get("review") or "").strip()
             if not review:
                 continue
-            try:
-                rating = float(row["rating"])
-                sentiment = sentiment_from_rating(rating)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"{row_number}. satırda geçersiz puan: {row.get('rating')!r}"
-                ) from exc
-
             # Klasik TF-IDF modelleri, önceki Zemberek + TurkishStemmer çıktısını varsa kullanır.
             prepared_text = (row.get("review_clean") or "").strip()
             if not prepared_text:
                 prepared_text = normalize_surface_text(review)
             texts.append(prepared_text)
-            labels.append(sentiment)
             # BERT'in alt-kelime tokenizer'ı ekleri ve yazım biçimlerini ham metinde öğrenebilir.
             model_texts.append(normalize_bert_text(review))
+            review_ids.append((row.get("review_id") or "").strip() or str(row_number - 1))
+            raw_reviews.append(review)
 
     if not texts:
         raise ValueError("CSV dosyasında işlenecek yorum bulunamadı.")
-    return texts, labels, model_texts
+    return texts, model_texts, review_ids, raw_reviews
+
+
+def label_reviews_from_texts(
+    texts: Sequence[str],
+    neutral_threshold: float = NEUTRAL_THRESHOLD,
+    batch_size: int = 8,
+) -> tuple[list[str], list[float]]:
+    try:
+        import torch  # Hazır duygu modelini yerel ortamda yükleyip olasılıkları hesaplamak için.
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer  # Türkçe yorum duygu modelini yüklemek için.
+    except ImportError as exc:
+        raise RuntimeError(
+            "Duygu modeli bağımlılıklarını kurmak için "
+            "'py -m pip install -r requirements-ml.txt' komutunu çalıştırın."
+        ) from exc
+
+    if batch_size < 1:
+        raise ValueError("Batch boyutu pozitif tam sayı olmalı.")
+
+    tokenizer = AutoTokenizer.from_pretrained(LABELER_MODEL)
+    model = AutoModelForSequenceClassification.from_pretrained(LABELER_MODEL)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+
+    label_by_id = {
+        int(label_id): label.lower()
+        for label_id, label in model.config.id2label.items()
+    }
+    positive_ids = [
+        label_id for label_id, label in label_by_id.items() if "positive" in label
+    ]
+    negative_ids = [
+        label_id for label_id, label in label_by_id.items() if "negative" in label
+    ]
+    if (
+        len(label_by_id) != 2
+        or len(positive_ids) != 1
+        or len(negative_ids) != 1
+    ):
+        raise RuntimeError(
+            f"{LABELER_MODEL} beklenen positive/negative sınıfları sağlamıyor: "
+            f"{label_by_id}"
+        )
+
+    labels: list[str] = []
+    confidences: list[float] = []
+    with torch.inference_mode():
+        for start in range(0, len(texts), batch_size):
+            batch_texts = list(texts[start : start + batch_size])
+            encoded = tokenizer(
+                batch_texts,
+                max_length=128,
+                padding=True,
+                truncation=True,
+                return_tensors="pt",
+            )
+            logits = model(
+                input_ids=encoded["input_ids"].to(device),
+                attention_mask=encoded["attention_mask"].to(device),
+            ).logits
+            probabilities = torch.softmax(logits, dim=1).cpu().tolist()
+            for row in probabilities:
+                sentiment, confidence = sentiment_from_probabilities(
+                    row[positive_ids[0]], neutral_threshold
+                )
+                labels.append(sentiment)
+                confidences.append(confidence)
+    return labels, confidences
+
+
+def save_text_labels(
+    review_ids: Sequence[str],
+    reviews: Sequence[str],
+    labels: Sequence[str],
+    confidences: Sequence[float],
+    output_path: Path,
+) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8-sig", newline="") as destination:
+        writer = csv.DictWriter(
+            destination,
+            fieldnames=("review_id", "review", "sentiment", "confidence"),
+        )
+        writer.writeheader()
+        writer.writerows(
+            {
+                "review_id": review_id,
+                "review": review,
+                "sentiment": sentiment,
+                "confidence": f"{confidence:.6f}",
+            }
+            for review_id, review, sentiment, confidence in zip(
+                review_ids, reviews, labels, confidences, strict=True
+            )
+        )
 
 
 def normalize_surface_text(text: str) -> str:
@@ -310,22 +412,49 @@ def save_results(results: Sequence[dict[str, Any]], output_path: Path) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     default_input = Path(__file__).with_name("iphone_yorumlar_hazir.csv")
     default_output = Path(__file__).with_name("siniflandirma_sonuclari.csv")
-    parser = argparse.ArgumentParser(
-        description="Dört klasik model ve Türkçe BERT ile duygu sınıflandırması yapar."
+    default_labels_output = Path(__file__).with_name(
+        "iphone_yorumlar_duygu_etiketli.csv"
     )
-    parser.add_argument("--input", type=Path, default=default_input, help="Etiketli yorum CSV'si")
+    parser = argparse.ArgumentParser(
+        description="Yorum metninden duygu etiketi üretip beş sınıflandırıcıyı eğitir."
+    )
+    parser.add_argument("--input", type=Path, default=default_input, help="Yorum metinlerini içeren CSV")
     parser.add_argument("--output", type=Path, default=default_output, help="Doğruluk sonuç CSV'si")
+    parser.add_argument(
+        "--labels-output",
+        type=Path,
+        default=default_labels_output,
+        help="Hazır duygu modelinin yorumlardan ürettiği etiketler",
+    )
     parser.add_argument("--epochs", type=int, default=3, help="BERT eğitim epoch sayısı")
     parser.add_argument("--batch-size", type=int, default=8, help="BERT mini-batch boyutu")
+    parser.add_argument(
+        "--neutral-threshold",
+        type=float,
+        default=NEUTRAL_THRESHOLD,
+        help="Olumlu/olumsuz güveni bu eşikten düşükse nötr ata (varsayılan: 0.60)",
+    )
     parser.add_argument(
         "--skip-bert", action="store_true", help="Yalnızca dört klasik modeli eğit."
     )
     args = parser.parse_args(argv)
     if args.epochs < 1 or args.batch_size < 1:
         parser.error("--epochs ve --batch-size pozitif tam sayı olmalı.")
+    if not 0.5 < args.neutral_threshold <= 1:
+        parser.error("--neutral-threshold 0.5'ten büyük ve 1'e eşit veya küçük olmalı.")
 
     try:
-        texts, labels, bert_texts = load_reviews(args.input)
+        texts, bert_texts, review_ids, raw_reviews = load_reviews(args.input)
+        labels, confidences = label_reviews_from_texts(
+            bert_texts, args.neutral_threshold, args.batch_size
+        )
+        save_text_labels(
+            review_ids,
+            raw_reviews,
+            labels,
+            confidences,
+            args.labels_output,
+        )
         label_counts = Counter(labels)
         if len(label_counts) != len(LABELS) or min(label_counts.values()) < 2:
             raise ValueError(
@@ -334,7 +463,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         train_indices, test_indices = split_indices(labels)
         print(f"Toplam yorum: {len(labels)}")
+        print(
+            f"Duygu etiketi kaynağı: yorum metni ({LABELER_MODEL}); "
+            f"nötr eşiği: %{args.neutral_threshold * 100:.0f}"
+        )
         print(f"Sınıf dağılımı: {dict(sorted(label_counts.items()))}")
+        print(f"Yorum etiketleri: {args.labels_output}")
         print(
             f"Eğitim/test: {len(train_indices)}/{len(test_indices)} "
             f"(stratified, random_state={RANDOM_SEED})"

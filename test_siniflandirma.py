@@ -1,31 +1,52 @@
-import unittest  # Veri bölmesi, sınıf etiketleri ve model listesini sınamak için.
-from pathlib import Path  # Proje içindeki örnek CSV yolunu kurmak için.
+import csv  # Ratingsiz örnek yorum CSV'leri oluşturup okuyabilmek için.
+import tempfile  # Test verilerini proje dosyalarına dokunmadan geçici yerde tutmak için.
+import unittest  # Duygu etiketleme ve model hazırlama davranışlarını doğrulamak için.
+from pathlib import Path  # Geçici CSV dosyalarının yollarını birleştirmek için.
 
-from siniflandirma import (  # Sınıflandırma akışının yeniden kullanılabilir birimlerini doğrulamak için.
+from siniflandirma import (  # Sınıflandırma akışının temel işlevlerini sınamak için.
     LABELS,
     load_reviews,
     make_classical_models,
-    sentiment_from_rating,
+    sentiment_from_probabilities,
     split_indices,
 )
 
 
 class ClassificationSetupTests(unittest.TestCase):
-    def test_rating_is_mapped_to_sentiment_without_using_title_text(self) -> None:
-        self.assertEqual(sentiment_from_rating(1), "olumsuz")
-        self.assertEqual(sentiment_from_rating(3), "notr")
-        self.assertEqual(sentiment_from_rating(5), "olumlu")
+    def test_neutral_is_based_on_model_confidence(self) -> None:
+        self.assertEqual(sentiment_from_probabilities(0.9), ("olumlu", 0.9))
+        self.assertEqual(sentiment_from_probabilities(0.1), ("olumsuz", 0.9))
+        self.assertEqual(sentiment_from_probabilities(0.55), ("notr", 0.55))
+        self.assertEqual(sentiment_from_probabilities(0.4), ("olumsuz", 0.6))
 
-    def test_prepared_dataset_contains_expected_labels_and_raw_bert_text(self) -> None:
-        dataset_path = Path(__file__).with_name("iphone_yorumlar_hazir.csv")
-        texts, labels, bert_texts = load_reviews(dataset_path)
+    def test_rejects_invalid_probabilities_and_thresholds(self) -> None:
+        with self.assertRaises(ValueError):
+            sentiment_from_probabilities(1.1)
+        with self.assertRaises(ValueError):
+            sentiment_from_probabilities(0.5, 0.5)
 
-        self.assertEqual(len(texts), 98)
-        self.assertEqual(set(labels), set(LABELS))
-        self.assertEqual(len(bert_texts), len(texts))
-        self.assertNotEqual(texts[0], bert_texts[0])
-        self.assertIn("orjinal", texts[0])
-        self.assertIn("orjinal", bert_texts[0])
+    def test_loads_reviews_without_any_rating_column(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            input_path = Path(directory) / "comments.csv"
+            with input_path.open("w", encoding="utf-8-sig", newline="") as source:
+                writer = csv.DictWriter(
+                    source, fieldnames=("review_id", "review", "review_clean")
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "review_id": "review-1",
+                        "review": "Kameralarımız çok güzel.",
+                        "review_clean": "kamera güzel",
+                    }
+                )
+
+            texts, bert_texts, review_ids, raw_reviews = load_reviews(input_path)
+
+        self.assertEqual(texts, ["kamera güzel"])
+        self.assertEqual(bert_texts, ["Kameralarımız çok güzel."])
+        self.assertEqual(review_ids, ["review-1"])
+        self.assertEqual(raw_reviews, ["Kameralarımız çok güzel."])
 
     def test_shared_split_is_disjoint_and_stratified(self) -> None:
         labels = ["olumsuz"] * 5 + ["notr"] * 7 + ["olumlu"] * 86

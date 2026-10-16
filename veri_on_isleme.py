@@ -2,13 +2,11 @@ from __future__ import annotations  # Tip açıklamalarını çalışma anında 
 
 import argparse  # Komut satırından girdi ve çıktı dosyalarını seçmek için.
 import csv  # Yorumları CSV'den okuyup işlenmiş sonuçları CSV'ye yazmak için.
-import math  # Puanların geçerli ve sonlu sayılar olduğunu doğrulamak için.
 import re  # URL, HTML, noktalama ve fazla boşlukları temizlemek için.
 import sys  # Python sürümünü ve Zemberek uyumluluk modülünü yönetmek için.
 import types  # Python 3.13'te Zemberek'in beklediği uyumluluk modülünü oluşturmak için.
 import typing  # Uyumluluk modülüne TextIO tipini sağlamak için.
 import unicodedata  # Türkçe karakterlerin Unicode biçimini tutarlı hale getirmek için.
-from collections import Counter  # İşlenen olumlu, nötr ve olumsuz yorumları saymak için.
 from pathlib import Path  # Varsayılan ve kullanıcı tarafından seçilen dosya yollarını yönetmek için.
 from typing import Callable, Optional, Sequence, Union  # Fonksiyon arayüzlerini ve türleri belirtmek için.
 
@@ -23,17 +21,6 @@ TURKISH_CASE_TRANSLATION = str.maketrans({"I": "ı", "İ": "i"})
 TEXT_TOKEN_TYPES = {"Word", "Number", "Abbreviation"}
 ZemberekTokenizer = Callable[[str], Sequence[tuple[str, str]]]
 TurkishStem = Callable[[str], str]
-
-
-def sentiment_from_rating(rating: float) -> str:
-    if not math.isfinite(rating) or not 1 <= rating <= 5:
-        raise ValueError(f"Puan 1 ile 5 arasında olmalı: {rating}")
-    # Puanları üç duygu sınıfına toplamak, yıldız değerlerini sınıflandırma etiketi yapar.
-    if rating <= 2:
-        return "olumsuz"
-    if rating == 3:
-        return "notr"
-    return "olumlu"
 
 
 def create_zemberek_tokenizer() -> ZemberekTokenizer:
@@ -82,7 +69,7 @@ def preprocess_csv(
     output_path: Union[str, Path],
     tokenize: ZemberekTokenizer,
     stem: TurkishStem,
-) -> tuple[int, int, Counter[str]]:
+) -> tuple[int, int]:
     input_file = Path(input_path)
     output_file = Path(output_path)
 
@@ -90,7 +77,7 @@ def preprocess_csv(
     with input_file.open("r", encoding="utf-8-sig", newline="") as source:
         reader = csv.DictReader(source)
         fieldnames = reader.fieldnames or []
-        missing_columns = {"review", "rating"} - set(fieldnames)
+        missing_columns = {"review"} - set(fieldnames)
         if missing_columns:
             raise ValueError(
                 "CSV dosyasında gerekli sütunlar eksik: "
@@ -99,21 +86,12 @@ def preprocess_csv(
 
         processed_rows: list[dict[str, str]] = []
         skipped_rows = 0
-        class_counts: Counter[str] = Counter()
-        for row_number, row in enumerate(reader, start=2):
+        for row in reader:
             review = (row.get("review") or "").strip()
             if not review:
                 skipped_rows += 1
                 continue
 
-            try:
-                rating = float(row["rating"])
-            except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"{row_number}. satırdaki puan sayı değil: {row['rating']!r}"
-                ) from exc
-
-            sentiment = sentiment_from_rating(rating)
             cleaned_review = clean_review(review, tokenize, stem)
             if not cleaned_review:
                 skipped_rows += 1
@@ -124,12 +102,9 @@ def preprocess_csv(
                     "review_id": (row.get("review_id") or "").strip(),
                     # Ham alanları denetim için koru; model girdisinde yalnızca review_clean kullanılmalı.
                     "review": review,
-                    "rating": str(rating),
                     "review_clean": cleaned_review,
-                    "sentiment": sentiment,
                 }
             )
-            class_counts[sentiment] += 1
 
     if not processed_rows:
         raise ValueError("İşlenecek boş olmayan yorum bulunamadı.")
@@ -139,12 +114,12 @@ def preprocess_csv(
     with output_file.open("w", encoding="utf-8-sig", newline="") as destination:
         writer = csv.DictWriter(
             destination,
-            fieldnames=("review_id", "review", "rating", "review_clean", "sentiment"),
+            fieldnames=("review_id", "review", "review_clean"),
         )
         writer.writeheader()
         writer.writerows(processed_rows)
 
-    return len(processed_rows), skipped_rows, class_counts
+    return len(processed_rows), skipped_rows
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -160,15 +135,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     try:
         tokenize = create_zemberek_tokenizer()
         stemmer = TurkishStemmer()
-        processed, skipped, class_counts = preprocess_csv(
-            args.input, args.output, tokenize, stemmer.stem
-        )
+        processed, skipped = preprocess_csv(args.input, args.output, tokenize, stemmer.stem)
     except (OSError, csv.Error, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
 
     print(f"İşlenen yorum: {processed}")
     print(f"Atlanan boş veya temizlenemeyen yorum: {skipped}")
-    print(f"Sınıf dağılımı: {dict(sorted(class_counts.items()))}")
     print(f"Çıktı: {args.output}")
     return 0
 

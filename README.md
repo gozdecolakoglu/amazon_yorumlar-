@@ -29,15 +29,12 @@ indirir. Olumsuzluk bildiren “değil” gibi kelimeler özellikle korunur; gen
 stop-word listesi uygulanmaz. Boş veya temizleme sonrası metinsiz yorumlar
 atlanır ve sonuç terminalde raporlanır.
 
-`rating` değerinden `sentiment` etiketi türetilir: 1–2 yıldız `olumsuz`,
-3 yıldız `notr`, 4–5 yıldız `olumlu`.
+Ön işleme yalnızca metin ve yorum kimliğini çıktı CSV'sine taşır; bu aşamada
+puanlardan duygu etiketi üretilmez. Duygu etiketleri sınıflandırma akışında
+yorum metninden hazır Türkçe duygu modeliyle alınır.
 
-Modelde özellik olarak yalnızca `review_clean`, hedef olarak `sentiment`
-kullanın. `rating` etiketin kaynağı olduğundan model girdisine eklenmemelidir.
-Başlık da girdiye dahil edilmez; bu veri kümesinde başlık puan metnini
-tekrarlayabildiği için hedef bilgisini sızdırabilir. Veri kümesi küçük ve
-olumlu yorumlara belirgin biçimde ağırlık verdiğinden, model performansını
-değerlendirirken sınıf dengesizliğini ve örnek sayısını göz önünde bulundurun.
+Klasik modellerde özellik olarak `review_clean`, Türkçe BERT'te ham `review`
+kullanılır. Başlık ve puan sütunları modele verilmez.
 
 Ön işleme testleri:
 
@@ -56,13 +53,22 @@ py -m pip install -r .\requirements-ml.txt
 py .\siniflandirma.py
 ```
 
-Türkçe BERT için `dbmdz/bert-base-turkish-cased` önceden eğitilmiş modeli
-indirilir. Klasik TF-IDF modelleri `review_clean` sütununu; BERT ise önceden
-eğitildiği yüzey biçimlerini korumak için ham `review` metnini kullanır.
-Bütün modeller aynı sabit tohumla oluşturulan stratified %80 eğitim / %20 test
-bölmesini ve puandan türetilen `sentiment` etiketini paylaşır. Her iki
-doğruluk puanı terminale yazılır ve `siniflandirma_sonuclari.csv` dosyasına
-kaydedilir.
+Önce `savasy/bert-base-turkish-sentiment-cased` modeli yorum metnini olumlu
+veya olumsuz olarak puanlar. En yüksek sınıf olasılığı %60'ın altındaysa yorum
+nötr etiketlenir; böylece 3 sınıfın tamamı yorum içeriği ve model güveninden
+üretilir, yıldız puanları kullanılmaz. Etiketler ve güven değerleri
+`iphone_yorumlar_duygu_etiketli.csv` dosyasına yazılır. Eşik değiştirilebilir:
+
+```powershell
+py .\siniflandirma.py --neutral-threshold 0.65
+```
+
+Klasik TF-IDF modelleri `review_clean` sütununu; incelenen Türkçe BERT modeli
+ise büyük/küçük harf biçimini koruyan ham `review` metnini kullanır. Etiketleme
+modeli ve sınıflandırıcılar yerel makinede çalışır; yorumlar bir hizmete
+yüklenmez. Modeller aynı sabit tohumla oluşturulan stratified %80 eğitim /
+%20 test bölmesini ve metinden üretilen `sentiment` etiketlerini paylaşır.
+Doğruluklar terminale ve `siniflandirma_sonuclari.csv` dosyasına kaydedilir.
 
 Varsayılan BERT eğitimi 3 epoch sürer. Ayarlanabilir:
 
@@ -72,21 +78,24 @@ py .\siniflandirma.py --epochs 5 --batch-size 8
 
 Yalnızca klasik modelleri çalıştırmak için `--skip-bert` kullanılabilir.
 Sonuçları değerlendirirken veri kümesinin küçük ve dengesiz olduğunu
-(olumlu sınıfı baskın) göz önünde bulundurun; tek bir test bölmesindeki
+(nötr sınıfı az sayıda örnek içeriyor) göz önünde bulundurun; tek bir test bölmesindeki
 doğruluk puanları genellenebilir performans garantisi değildir.
 
-Bu veri kümesinde (78 eğitim / 20 test örneği, `random_state=42`) ölçülen
-doğruluklar:
+Bu veri kümesinde %60 eşikle hazır modelin ürettiği etiket dağılımı 48 olumlu,
+44 olumsuz ve 8 nötr yorumdur. Ölçülen eğitim/test doğrulukları:
 
 | Model | Eğitim doğruluğu | Test doğruluğu |
 |---|---:|---:|
-| Naive Bayes | %87,18 | %90,00 |
-| Lojistik Regresyon | %100,00 | %90,00 |
-| Support Vector Machine | %100,00 | %90,00 |
-| Random Forest | %100,00 | %90,00 |
-| Türkçe BERT (`dbmdz/bert-base-turkish-cased`) | %89,74 | %90,00 |
+| Naive Bayes | %91,25 | %55,00 |
+| Lojistik Regresyon | %100,00 | %75,00 |
+| Support Vector Machine | %100,00 | %80,00 |
+| Random Forest | %100,00 | %65,00 |
+| Türkçe BERT (`dbmdz/bert-base-turkish-cased`) | %62,50 | %50,00 |
 
-Test kümesindeki 20 yorumun 18'i olumlu olduğundan, her yorumu olumlu sayan
-çoğunluk tabanı da %90 test doğruluğu alır. Bu nedenle bu deneydeki test
-doğrulukları, modellerin çoğunluk tabanını aştığını göstermiyor; daha fazla ve
-dengeli etiketli veriyle tekrar değerlendirme yapılmalı.
+Önemli: Bu doğruluk puanları bağımsız insan etiketlerine göre değil, hazır
+duygu modelinin ürettiği otomatik etiketlere göre hesaplanır. Yani modellerin
+öğretmen modelle ne ölçüde uyuştuğunu gösterir; insan yargısına göre doğruluk
+garantisi değildir. Testte yalnızca bir nötr örnek olduğundan üç sınıf
+başarımını bu sonuçlarla güvenilir biçimde değerlendirmek mümkün değildir.
+Bilimsel değerlendirme için yorumlar insan tarafından etiketlenmeli ve
+modeller bu bağımsız etiketlerle ölçülmelidir.

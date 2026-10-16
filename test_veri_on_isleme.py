@@ -9,7 +9,6 @@ from veri_on_isleme import (
     clean_review,
     create_zemberek_tokenizer,
     preprocess_csv,
-    sentiment_from_rating,
 )
 
 
@@ -51,7 +50,7 @@ class PreprocessCsvTests(unittest.TestCase):
         cls.tokenize = create_zemberek_tokenizer()
         cls.stem = TurkishStemmer().stem
 
-    def test_creates_training_rows_and_sentiment_labels(self) -> None:
+    def test_processes_comments_without_creating_rating_labels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             # Geçici dosyalar, örnek CSV testinin gerçek kullanıcı verisini etkilemesini önler.
             input_path = Path(directory) / "input.csv"
@@ -64,35 +63,21 @@ class PreprocessCsvTests(unittest.TestCase):
                 writer.writerows(
                     (
                         {"review_id": "a", "rating": "1.0", "review": "Hiç iyi değil!"},
-                        {"review_id": "b", "rating": "3.0", "review": "İdare eder."},
-                        {"review_id": "c", "rating": "5.0", "review": "Çok güzel."},
-                        {"review_id": "d", "rating": "4.0", "review": "   "},
+                        {"review_id": "b", "rating": "not-a-rating", "review": "Çok güzel."},
+                        {"review_id": "c", "rating": "5.0", "review": "   "},
                     )
                 )
 
-            count, skipped, class_counts = preprocess_csv(
+            count, skipped = preprocess_csv(
                 input_path, output_path, type(self).tokenize, type(self).stem
             )
 
-            self.assertEqual((count, skipped), (3, 1))
-            self.assertEqual(
-                class_counts, {"olumsuz": 1, "notr": 1, "olumlu": 1}
-            )
+            self.assertEqual((count, skipped), (2, 1))
             with output_path.open(encoding="utf-8-sig", newline="") as result:
                 rows = list(csv.DictReader(result))
-            self.assertEqual(
-                [row["sentiment"] for row in rows],
-                ["olumsuz", "notr", "olumlu"],
-            )
             self.assertEqual(rows[0]["review_clean"], "hiç iyi değil")
-            self.assertEqual(set(rows[0]), {
-                "review_id", "review", "rating", "review_clean", "sentiment"
-            })
-
-    def test_rejects_rating_outside_supported_range(self) -> None:
-        # Geçersiz puanlardan sessizce etiket üretmek eğitim verisini yanlış sınıflandırır.
-        with self.assertRaises(ValueError):
-            sentiment_from_rating(0)
+            self.assertEqual(rows[1]["review_clean"], "çok güzel")
+            self.assertEqual(set(rows[0]), {"review_id", "review", "review_clean"})
 
 
 if __name__ == "__main__":
